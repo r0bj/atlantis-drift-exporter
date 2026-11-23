@@ -78,7 +78,7 @@ func TestCollectExposesProjectStates(t *testing.T) {
 	defer srv.Close()
 
 	expected := `
-# HELP atlantis_drift_check_failed Whether the last drift check for the project failed (1) or succeeded (0).
+# HELP atlantis_drift_check_failed Whether the last drift check for the project failed (1) or not (0). A check blocked by a pull request lock is not a failure.
 # TYPE atlantis_drift_check_failed gauge
 atlantis_drift_check_failed{base_branch="",directory="envs/dev",project="clean",ref="main",repository="acme/infra",workspace="default"} 0
 atlantis_drift_check_failed{base_branch="",directory="envs/prod",project="drifted",ref="main",repository="acme/infra",workspace="default"} 0
@@ -115,6 +115,82 @@ atlantis_drift_changes{action="import",base_branch="",directory="envs/dev",proje
 atlantis_drift_changes{action="import",base_branch="",directory="envs/prod",project="drifted",ref="main",repository="acme/infra",workspace="default"} 4
 `
 	err = testutil.CollectAndCompare(exp, strings.NewReader(expectedChanges), "atlantis_drift_changes")
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCollectSeparatesLockedProjectsFromFailures(t *testing.T) {
+	const response = `{
+  "success": true,
+  "data": {
+    "repository": "acme/infra",
+    "projects": [
+      {
+        "project_name": "clean",
+        "directory": "envs/dev",
+        "workspace": "default",
+        "ref": "main",
+        "has_drift": false,
+        "last_checked": "2026-11-23T05:00:00Z"
+      },
+      {
+        "project_name": "locked",
+        "directory": "envs/prod",
+        "workspace": "default",
+        "ref": "main",
+        "has_drift": false,
+        "last_checked": "2026-11-23T05:00:01Z",
+        "error": "This project is currently locked by an unapplied plan from pull #309. To continue, delete the lock from #309 or apply that plan and merge the pull request.\n\nOnce the lock is released, comment ` + "`atlantis plan`" + ` here to re-plan."
+      },
+      {
+        "project_name": "broken",
+        "directory": "envs/stage",
+        "workspace": "default",
+        "ref": "main",
+        "has_drift": false,
+        "last_checked": "2026-11-23T05:00:02Z",
+        "error": "running terraform init: exit status 1"
+      },
+      {
+        "project_name": "mentions-lock",
+        "directory": "envs/test",
+        "workspace": "default",
+        "ref": "main",
+        "has_drift": false,
+        "last_checked": "2026-11-23T05:00:03Z",
+        "error": "Error acquiring the state lock: This project is currently locked by an unapplied plan"
+      }
+    ]
+  }
+}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(response))
+	}))
+	defer srv.Close()
+
+	exp := newTestExporter(srv.URL, "acme/infra")
+	exp.refresh(t.Context())
+
+	expected := `
+# HELP atlantis_drift_check_failed Whether the last drift check for the project failed (1) or not (0). A check blocked by a pull request lock is not a failure.
+# TYPE atlantis_drift_check_failed gauge
+atlantis_drift_check_failed{base_branch="",directory="envs/dev",project="clean",ref="main",repository="acme/infra",workspace="default"} 0
+atlantis_drift_check_failed{base_branch="",directory="envs/prod",project="locked",ref="main",repository="acme/infra",workspace="default"} 0
+atlantis_drift_check_failed{base_branch="",directory="envs/stage",project="broken",ref="main",repository="acme/infra",workspace="default"} 1
+atlantis_drift_check_failed{base_branch="",directory="envs/test",project="mentions-lock",ref="main",repository="acme/infra",workspace="default"} 1
+# HELP atlantis_drift_check_locked Whether the last drift check for the project was blocked by a pull request lock (1) or not (0).
+# TYPE atlantis_drift_check_locked gauge
+atlantis_drift_check_locked{base_branch="",directory="envs/dev",project="clean",ref="main",repository="acme/infra",workspace="default"} 0
+atlantis_drift_check_locked{base_branch="",directory="envs/prod",project="locked",ref="main",repository="acme/infra",workspace="default"} 1
+atlantis_drift_check_locked{base_branch="",directory="envs/stage",project="broken",ref="main",repository="acme/infra",workspace="default"} 0
+atlantis_drift_check_locked{base_branch="",directory="envs/test",project="mentions-lock",ref="main",repository="acme/infra",workspace="default"} 0
+# HELP atlantis_drift_has_drift Whether the last successful check found drift. Not exposed for projects whose last check failed.
+# TYPE atlantis_drift_has_drift gauge
+atlantis_drift_has_drift{base_branch="",directory="envs/dev",project="clean",ref="main",repository="acme/infra",workspace="default"} 0
+`
+	err := testutil.CollectAndCompare(exp, strings.NewReader(expected),
+		"atlantis_drift_check_failed", "atlantis_drift_check_locked", "atlantis_drift_has_drift")
 	if err != nil {
 		t.Fatal(err)
 	}

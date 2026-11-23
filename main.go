@@ -29,6 +29,10 @@ const (
 	defaultRefreshTimeout  = 30 * time.Second
 	maxResponseBytes       = 10 << 20
 	shutdownTimeout        = 5 * time.Second
+
+	// Atlantis has no error code for project locks, so they are matched by message.
+	// An unrecognized message is reported as a failed check.
+	projectLockedErrorPrefix = "This project is currently locked by an unapplied plan"
 )
 
 var supportedVCSTypes = []string{"Github", "Gitlab", "Gitea"}
@@ -249,6 +253,7 @@ type exporter struct {
 	changes     *prometheus.Desc
 	lastChecked *prometheus.Desc
 	checkFailed *prometheus.Desc
+	checkLocked *prometheus.Desc
 }
 
 func newExporter(client *atlantisClient, repositories []string, timeout time.Duration) *exporter {
@@ -287,7 +292,12 @@ func newExporter(client *atlantisClient, repositories []string, timeout time.Dur
 		),
 		checkFailed: prometheus.NewDesc(
 			"atlantis_drift_check_failed",
-			"Whether the last drift check for the project failed (1) or succeeded (0).",
+			"Whether the last drift check for the project failed (1) or not (0). A check blocked by a pull request lock is not a failure.",
+			projectLabels, nil,
+		),
+		checkLocked: prometheus.NewDesc(
+			"atlantis_drift_check_locked",
+			"Whether the last drift check for the project was blocked by a pull request lock (1) or not (0).",
 			projectLabels, nil,
 		),
 	}
@@ -300,6 +310,7 @@ func (e *exporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- e.changes
 	ch <- e.lastChecked
 	ch <- e.checkFailed
+	ch <- e.checkLocked
 }
 
 // run refreshes the drift status immediately and then on every interval.
@@ -387,12 +398,15 @@ func (e *exporter) collectProject(repository string, project driftProject, ch ch
 		ch <- prometheus.MustNewConstMetric(e.lastChecked, prometheus.GaugeValue, float64(project.LastChecked.UnixNano())/1e9, labels...)
 	}
 
-	// Atlantis reports has_drift=false for failed checks, so the drift state is unknown.
+	locked := strings.HasPrefix(project.Error, projectLockedErrorPrefix)
+	failed := project.Error != "" && !locked
+	ch <- prometheus.MustNewConstMetric(e.checkFailed, prometheus.GaugeValue, boolToFloat(failed), labels...)
+	ch <- prometheus.MustNewConstMetric(e.checkLocked, prometheus.GaugeValue, boolToFloat(locked), labels...)
+
+	// Atlantis reports has_drift=false for checks that did not complete, so the drift state is unknown.
 	if project.Error != "" {
-		ch <- prometheus.MustNewConstMetric(e.checkFailed, prometheus.GaugeValue, 1, labels...)
 		return
 	}
-	ch <- prometheus.MustNewConstMetric(e.checkFailed, prometheus.GaugeValue, 0, labels...)
 	ch <- prometheus.MustNewConstMetric(e.hasDrift, prometheus.GaugeValue, boolToFloat(project.HasDrift), labels...)
 
 	details := driftDetails{}

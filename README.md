@@ -43,12 +43,15 @@ Atlantis v0.49.0 does not have the `experiments` setting, so omit `ATLANTIS_EXPE
 | `atlantis_drift_exporter_last_success_timestamp_seconds{repository}` | Unix timestamp of the last successful read of the status API |
 | `atlantis_drift_has_drift{...}` | Whether the last successful check found drift |
 | `atlantis_drift_changes{...,action}` | Resource changes by action: `add`, `change`, `destroy`, `import`, `forget` |
-| `atlantis_drift_check_failed{...}` | Whether the last check for the project failed |
+| `atlantis_drift_check_failed{...}` | Whether the last check for the project failed. A pull request lock is not a failure |
+| `atlantis_drift_check_locked{...}` | Whether the last check for the project was blocked by a pull request lock |
 | `atlantis_drift_last_checked_timestamp_seconds{...}` | Unix timestamp of the last check, successful or not |
 
 Project metrics have the labels `repository`, `project`, `directory`, `workspace`, `ref` and `base_branch`.
 
 When a check fails, Atlantis reports `has_drift=false`. The exporter treats the drift state as unknown and does not publish `atlantis_drift_has_drift` or `atlantis_drift_changes` for that project.
+
+An unapplied plan in a pull request locks its project, and Atlantis then cannot check that project for drift. The exporter reports this as `atlantis_drift_check_locked`, with no `atlantis_drift_has_drift` or `atlantis_drift_changes`. Atlantis has no error code for this case, so the exporter matches the start of the error message. If a future Atlantis version changes the message, locked projects are reported as `atlantis_drift_check_failed`.
 
 When a refresh fails, the exporter sets `atlantis_drift_exporter_up` to `0` and keeps serving the last successful project metrics.
 
@@ -74,6 +77,13 @@ groups:
       severity: warning
     annotations:
       summary: 'Drift check failed in {{ $labels.repository }}: {{ $labels.project }} ({{ $labels.workspace }})'
+  - alert: TerraformDriftCheckLocked
+    expr: atlantis_drift_check_locked == 1
+    for: 7d
+    labels:
+      severity: warning
+    annotations:
+      summary: 'Drift check blocked by a pull request lock in {{ $labels.repository }}: {{ $labels.project }} ({{ $labels.workspace }})'
   - alert: TerraformDriftCheckStale
     # Assumes detection runs at least once a day.
     expr: |
